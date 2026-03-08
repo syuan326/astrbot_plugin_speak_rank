@@ -360,35 +360,142 @@ class SpeakRankPlugin(Star):
         try:
             total_users = len(users_data)
             total_messages = sum(u["text_count"] + u["image_count"] for u in users_data)
-            
+
+            ranked_users = []
+            for idx, user in enumerate(users_data, start=1):
+                user_total = user["text_count"] + user["image_count"]
+                percent = round((user_total / total_messages) * 100, 1) if total_messages else 0
+                ranked_users.append({
+                    **user,
+                    "rank": idx,
+                    "total_count": user_total,
+                    "percent": percent,
+                })
+
+            podium = {
+                "first": ranked_users[0] if len(ranked_users) > 0 else None,
+                "second": ranked_users[1] if len(ranked_users) > 1 else None,
+                "third": ranked_users[2] if len(ranked_users) > 2 else None,
+            }
+
             # 构造模板数据
             template_data = {
-                "group_name": f"群{group_id[-4:]}",  # 简化的群名
+                "group_name": f"群{group_id[-4:]}",
                 "total_users": total_users,
                 "total_messages": total_messages,
-                "users": users_data,
+                "users": ranked_users,
+                "podium": podium,
                 "date": date.strftime("%Y-%m-%d")
             }
-            
+
             # 使用HTML模板生成图片
             if self.image_template:
                 html_content = self.image_template
             else:
-                # 默认模板
+                # 默认模板（暗色排行榜）
                 html_content = """
-                <div style="font-family: Arial; padding: 20px; background-color: #f5f5f5;">
-                  <h1>{{group_name}} 发言排行榜 ({{date}})</h1>
-                  <p>统计时间范围：过去24小时</p>
-                  <p>总发言人数：{{total_users}}</p>
-                  <p>总消息数：{{total_messages}}</p>
-                  <ul>
-                  {% for user in users %}
-                    <li>
-                      <img src="{{user.avatar}}" width="30" height="30" style="border-radius: 50%; vertical-align: middle; margin-right: 10px;" />
-                      {{user.user_name}} - 文本: {{user.text_count}}, 图片: {{user.image_count}}
-                    </li>
-                  {% endfor %}
-                  </ul>
+                <style>
+                  * { box-sizing: border-box; }
+                  body {
+                    margin: 0;
+                    font-family: "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+                    background: radial-gradient(circle at 20% 0%, #222a64 0%, #0a0d1a 55%, #06080e 100%);
+                    color: #eaf0ff;
+                    width: 700px;
+                    padding: 24px;
+                  }
+                  .card { background: rgba(11, 14, 24, 0.82); border: 1px solid rgba(90, 118, 255, 0.25); border-radius: 20px; padding: 20px; box-shadow: 0 15px 35px rgba(0,0,0,.35); }
+                  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 18px; }
+                  .title { font-size: 34px; font-weight: 700; margin: 0; color: #f3f6ff; }
+                  .sub { margin-top: 8px; color: #aeb8d9; font-size: 14px; }
+                  .total { text-align: right; }
+                  .total-num { font-size: 48px; font-weight: 800; color: #ffffff; line-height: 1; }
+                  .total-label { color: #99a4c8; font-size: 13px; margin-top: 6px; }
+                  .podium { display: flex; justify-content: center; align-items: flex-end; gap: 16px; margin: 12px 0 18px; }
+                  .podium-user { text-align: center; min-width: 140px; }
+                  .avatar { width: 74px; height: 74px; border-radius: 50%; border: 3px solid #6f7ec0; object-fit: cover; }
+                  .podium-first .avatar { width: 92px; height: 92px; border-color: #ffd34d; }
+                  .rank-badge { display:inline-flex; align-items:center; justify-content:center; margin-top: 6px; width: 24px; height: 24px; border-radius: 50%; font-size: 13px; font-weight: 700; background: #2a3258; }
+                  .podium-first .rank-badge { background: #f3ba2f; color: #251a00; }
+                  .podium-name { margin-top: 6px; color: #f2f5ff; font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+                  .podium-count { font-size: 28px; font-weight: 800; color: #ffd34d; line-height: 1.1; }
+                  .podium-meta { color: #8ea0cb; font-size: 12px; }
+                  .table { margin-top: 10px; border-radius: 14px; overflow: hidden; border: 1px solid rgba(90,118,255,.22); }
+                  .row { display:flex; align-items:center; padding: 10px 14px; background: rgba(18, 24, 41, 0.72); border-bottom: 1px solid rgba(255,255,255,0.05); }
+                  .row:last-child { border-bottom: none; }
+                  .col-rank { width: 34px; color:#d2dbff; font-weight:700; }
+                  .col-user { display:flex; align-items:center; flex:1; min-width:0; }
+                  .mini-avatar { width: 34px; height: 34px; border-radius: 50%; margin-right: 10px; object-fit: cover; border: 1px solid rgba(255,255,255,0.2); }
+                  .name-wrap { min-width: 0; }
+                  .name { color:#edf2ff; font-size:14px; font-weight:600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+                  .tags { margin-top: 2px; font-size: 11px; color: #8ea0cb; }
+                  .col-count { width: 72px; text-align:right; color:#f5f7ff; font-weight:700; }
+                  .col-percent { width: 56px; text-align:right; color:#95a5cc; font-size:12px; }
+                  .footer { margin-top: 10px; text-align:center; color:#6f7da9; font-size:12px; }
+                </style>
+
+                <div class="card">
+                  <div class="header">
+                    <div>
+                      <h1 class="title">今日水群排行榜</h1>
+                      <div class="sub">群聊：{{group_name}} · 日期：{{date}}</div>
+                    </div>
+                    <div class="total">
+                      <div class="total-num">{{total_messages}}</div>
+                      <div class="total-label">总消息数 / {{total_users}} 人</div>
+                    </div>
+                  </div>
+
+                  <div class="podium">
+                    {% if podium.second %}
+                    <div class="podium-user">
+                      <img class="avatar" src="{{podium.second.avatar}}" />
+                      <div class="rank-badge">2</div>
+                      <div class="podium-name">{{podium.second.user_name}}</div>
+                      <div class="podium-count">{{podium.second.total_count}}</div>
+                      <div class="podium-meta">文本 {{podium.second.text_count}} / 图片 {{podium.second.image_count}}</div>
+                    </div>
+                    {% endif %}
+
+                    {% if podium.first %}
+                    <div class="podium-user podium-first">
+                      <img class="avatar" src="{{podium.first.avatar}}" />
+                      <div class="rank-badge">1</div>
+                      <div class="podium-name">{{podium.first.user_name}}</div>
+                      <div class="podium-count">{{podium.first.total_count}}</div>
+                      <div class="podium-meta">文本 {{podium.first.text_count}} / 图片 {{podium.first.image_count}}</div>
+                    </div>
+                    {% endif %}
+
+                    {% if podium.third %}
+                    <div class="podium-user">
+                      <img class="avatar" src="{{podium.third.avatar}}" />
+                      <div class="rank-badge">3</div>
+                      <div class="podium-name">{{podium.third.user_name}}</div>
+                      <div class="podium-count">{{podium.third.total_count}}</div>
+                      <div class="podium-meta">文本 {{podium.third.text_count}} / 图片 {{podium.third.image_count}}</div>
+                    </div>
+                    {% endif %}
+                  </div>
+
+                  <div class="table">
+                    {% for user in users %}
+                    <div class="row">
+                      <div class="col-rank">{{user.rank}}</div>
+                      <div class="col-user">
+                        <img class="mini-avatar" src="{{user.avatar}}" />
+                        <div class="name-wrap">
+                          <div class="name">{{user.user_name}}</div>
+                          <div class="tags">文本 {{user.text_count}} · 图片 {{user.image_count}}</div>
+                        </div>
+                      </div>
+                      <div class="col-count">{{user.total_count}}条</div>
+                      <div class="col-percent">{{user.percent}}%</div>
+                    </div>
+                    {% endfor %}
+                  </div>
+
+                  <div class="footer">Powered by AstrBot Speak Rank</div>
                 </div>
                 """
                 
