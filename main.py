@@ -2,7 +2,7 @@ import json
 import aiosqlite
 import asyncio
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -42,6 +42,7 @@ class SpeakRankPlugin(Star):
         self.schedule_time = self.config.get("schedule_time", "22:00")
         self.max_users_in_rank = self.config.get("max_users_in_rank", 10)
         self.image_template = self.config.get("image_template", "")
+        self.group_sessions: Dict[str, str] = {}
         
         # 注册定时任务
         asyncio.create_task(self.schedule_task())
@@ -62,10 +63,17 @@ class SpeakRankPlugin(Star):
                     user_name TEXT,
                     text_count INTEGER DEFAULT 0,
                     image_count INTEGER DEFAULT 0,
+                    session_id TEXT,
                     date DATE NOT NULL,
                     UNIQUE(group_id, user_id, date)
                 )
             """)
+
+            # 兼容旧版本数据库
+            await cursor.execute("PRAGMA table_info(daily_stats)")
+            columns = {row[1] for row in await cursor.fetchall()}
+            if "session_id" not in columns:
+                await cursor.execute("ALTER TABLE daily_stats ADD COLUMN session_id TEXT")
             
             await conn.commit()
 
@@ -87,13 +95,14 @@ class SpeakRankPlugin(Star):
                 
             user_id = event.get_sender_id()
             user_name = event.get_sender_name()
+            session_id = self._extract_group_session_id(event)
             message_type = self._classify_message(event)
             
             if message_type is None:
                 return
                 
             # 更新统计数据
-            await self.update_user_stats(group_id, user_id, user_name, message_type)
+            await self.update_user_stats(group_id, user_id, user_name, message_type, session_id)
             
         except Exception as e:
             logger.error(f"处理群消息时出错: {e}")
@@ -121,7 +130,42 @@ class SpeakRankPlugin(Star):
         else:
             return None
 
-    async def update_user_stats(self, group_id: str, user_id: str, user_name: str, msg_type: str):
+    def _extract_group_session_id(self, event: AstrMessageEvent) -> Optional[str]:
+        """从事件中提取可用于 send_message 的 session_id。"""
+        candidates = []
+
+        for name in ("unified_msg_origin", "session_id"):
+            value = getattr(event, name, None)
+            if value:
+                candidates.append(value)
+
+        for method in ("get_unified_msg_origin", "get_session_id"):
+            fn = getattr(event, method, None)
+            if callable(fn):
+                try:
+                    value = fn()
+                    if value:
+                        candidates.append(value)
+                except Exception:
+                    continue
+
+        message_obj = getattr(event, "message_obj", None)
+        if message_obj:
+            for name in ("unified_msg_origin", "session_id"):
+                value = getattr(message_obj, name, None)
+                if value:
+                    candidates.append(value)
+
+        for item in candidates:
+            if isinstance(item, str) and item.count(":") >= 2:
+                group_id = str(event.get_group_id())
+                if item.endswith(f":{group_id}"):
+                    self.group_sessions[group_id] = item
+                    return item
+
+        return None
+
+    async def update_user_stats(self, group_id: str, user_id: str, user_name: str, msg_type: str, session_id: Optional[str] = None):
         """
         更新用户统计数据
         
@@ -153,18 +197,18 @@ class SpeakRankPlugin(Star):
                         image_count += 1
                         
                     await cursor.execute("""
-                        UPDATE daily_stats SET text_count=?, image_count=?, user_name=?
+                        UPDATE daily_stats SET text_count=?, image_count=?, user_name=?, session_id=COALESCE(?, session_id)
                         WHERE group_id=? AND user_id=? AND date=?
-                    """, (text_count, image_count, user_name, group_id, user_id, today))
+                    """, (text_count, image_count, user_name, session_id, group_id, user_id, today))
                 else:
                     # 插入新记录
                     text_count = 1 if msg_type == "text" else 0
                     image_count = 1 if msg_type == "image" else 0
                     
                     await cursor.execute("""
-                        INSERT INTO daily_stats (group_id, user_id, user_name, text_count, image_count, date)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (group_id, user_id, user_name, text_count, image_count, today))
+                        INSERT INTO daily_stats (group_id, user_id, user_name, text_count, image_count, session_id, date)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (group_id, user_id, user_name, text_count, image_count, session_id, today))
                     
                 await conn.commit()
                 
@@ -207,13 +251,18 @@ class SpeakRankPlugin(Star):
             
             for group_id, users_data in stats.items():
                 try:
+                    session_id = await self.get_group_session(group_id, yesterday)
+
                     # 生成排行榜图片
                     image_url = await self.generate_ranking_image(group_id, users_data, yesterday)
                     
                     # 发送到群聊
                     if image_url:
                         message_chain = [Image.fromURL(image_url)]
-                        await self.context.send_message(f"group_{group_id}", message_chain)
+                        if session_id:
+                            await self.context.send_message(session_id, message_chain)
+                        else:
+                            logger.warning(f"群 {group_id} 缺少合法 session_id，跳过发送排行榜")
                         
                 except Exception as e:
                     logger.error(f"处理群 {group_id} 的排行榜时出错: {e}")
@@ -267,6 +316,34 @@ class SpeakRankPlugin(Star):
         except Exception as e:
             logger.error(f"获取统计数据时出错: {e}")
             return {}
+
+    async def get_group_session(self, group_id: str, date) -> Optional[str]:
+        """优先从内存和数据库中获取群聊 session_id。"""
+        cached = self.group_sessions.get(group_id)
+        if cached:
+            return cached
+
+        try:
+            async with aiosqlite.connect(self.db_path) as conn:
+                cursor = await conn.cursor()
+                await cursor.execute(
+                    """
+                    SELECT session_id
+                    FROM daily_stats
+                    WHERE group_id=? AND date=? AND session_id IS NOT NULL AND session_id != ''
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (group_id, date),
+                )
+                row = await cursor.fetchone()
+                if row and row[0]:
+                    self.group_sessions[group_id] = row[0]
+                    return row[0]
+        except Exception as e:
+            logger.error(f"获取群 {group_id} session_id 时出错: {e}")
+
+        return None
 
     async def generate_ranking_image(self, group_id: str, users_data: List[Dict], date) -> str:
         """
