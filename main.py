@@ -159,7 +159,8 @@ class SpeakRankPlugin(Star):
         for item in candidates:
             if isinstance(item, str) and item.count(":") >= 2:
                 group_id = str(event.get_group_id())
-                if item.endswith(f":{group_id}"):
+                segments = item.split(":")
+                if segments[-1] == group_id or group_id in segments:
                     self.group_sessions[group_id] = item
                     return item
 
@@ -259,10 +260,9 @@ class SpeakRankPlugin(Star):
                     # 发送到群聊
                     if image_url:
                         message_chain = [Image.fromURL(image_url)]
-                        if session_id:
-                            await self.context.send_message(session_id, message_chain)
-                        else:
-                            logger.warning(f"群 {group_id} 缺少合法 session_id，跳过发送排行榜")
+                        sent = await self._send_ranking_to_group(group_id, session_id, message_chain)
+                        if not sent:
+                            logger.warning(f"群 {group_id} 排行榜发送失败：未找到可用 session")
                         
                 except Exception as e:
                     logger.error(f"处理群 {group_id} 的排行榜时出错: {e}")
@@ -340,10 +340,55 @@ class SpeakRankPlugin(Star):
                 if row and row[0]:
                     self.group_sessions[group_id] = row[0]
                     return row[0]
+
+                # 兜底：如果昨日没保留会话，尝试使用该群最近一次可用会话
+                await cursor.execute(
+                    """
+                    SELECT session_id
+                    FROM daily_stats
+                    WHERE group_id=? AND session_id IS NOT NULL AND session_id != ''
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (group_id,),
+                )
+                row = await cursor.fetchone()
+                if row and row[0]:
+                    self.group_sessions[group_id] = row[0]
+                    return row[0]
         except Exception as e:
             logger.error(f"获取群 {group_id} session_id 时出错: {e}")
 
         return None
+
+    def _build_session_candidates(self, group_id: str, session_id: Optional[str]) -> List[str]:
+        """构建发送目标候选列表，优先真实会话，最后尝试常见格式。"""
+        candidates: List[str] = []
+
+        if session_id:
+            candidates.append(session_id)
+
+        known_prefixes = ["aiocqhttp:group", "onebot:group", "qq:group"]
+        for prefix in known_prefixes:
+            candidates.append(f"{prefix}:{group_id}")
+
+        deduped: List[str] = []
+        for candidate in candidates:
+            if candidate and candidate not in deduped:
+                deduped.append(candidate)
+        return deduped
+
+    async def _send_ranking_to_group(self, group_id: str, session_id: Optional[str], message_chain: List[Image]) -> bool:
+        """尝试多个 session 发送，提升定时发送成功率。"""
+        for target in self._build_session_candidates(group_id, session_id):
+            try:
+                await self.context.send_message(target, message_chain)
+                self.group_sessions[group_id] = target
+                return True
+            except Exception as e:
+                logger.warning(f"发送群 {group_id} 排行榜失败，目标 {target}，原因: {e}")
+
+        return False
 
     async def generate_ranking_image(self, group_id: str, users_data: List[Dict], date) -> str:
         """
