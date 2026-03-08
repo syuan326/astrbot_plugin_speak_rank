@@ -1,0 +1,5 @@
+name: astrbot_plugin_speak_rank
+author: Your Name
+description: 一个发言排行统计插件，按天统计群内成员的文本和图片发言情况，定时发送排行榜图片并自动清理数据。
+version: 1.0.0
+repo: https://github.com/yourusername/astrbot_plugin_speak_rank

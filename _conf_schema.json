@@ -1,0 +1,29 @@
+{
+  "whitelist_groups": {
+    "description": "统计群白名单，仅统计这些群的发言情况",
+    "type": "list",
+    "hint": "请输入群ID列表，例如：[\"123456\", \"789012\"]",
+    "default": []
+  },
+  "schedule_time": {
+    "description": "定时发送时间（24小时制，例如 22:00）",
+    "type": "string",
+    "hint": "每天在此时间点自动生成并发送排行榜图片",
+    "default": "22:00"
+  },
+  "max_users_in_rank": {
+    "description": "排行榜中最多显示的用户数量",
+    "type": "int",
+    "hint": "设置排行榜中最多展示多少位用户的数据",
+    "default": 10
+  },
+  "image_template": {
+    "description": "排行榜图片模板（支持变量替换）",
+    "type": "text",
+    "hint": "可用变量：{{group_name}}(群名), {{total_users}}(总发言人数), {{total_messages}}(总消息数), {{user.avatar}}(头像), {{user.name}}(用户名), {{user.text_count}}(文本消息数), {{user.image_count}}(图片消息数)",
+    "default": "<div style=\"font-family: Arial; padding: 20px; background-color: #f5f5f5;\">\n  <h1>{{group_name}} 发言排行榜</h1>\n  <p>统计时间范围：过去24小时</p>\n  <p>总发言人数：{{total_users}}</p>\n  <p>总消息数：{{total_messages}}</p>\n  <ul>\n  {% for user in users %}\n    <li>\n      <img src=\"{{user.avatar}}\" width=\"30\" height=\"30\" style=\"border-radius: 50%; vertical-align: middle; margin-right: 10px;\" />\n      {{user.name}} - 文本: {{user.text_count}}, 图片: {{user.image_count}}\n    </li>\n  {% endfor %}\n  </ul>\n</div>",
+    "editor_mode": true,
+    "editor_language": "html",
+    "editor_theme": "vs-light"
+  }
+}
